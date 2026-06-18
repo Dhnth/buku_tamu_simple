@@ -7,12 +7,24 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+.pnp
+.pnp.js
+
+# Build
 dist
 dist-ssr
+build
 *.local
 
-# Editor directories and files
+# Environment variables - PASTIKAN INI!
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Editor
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -22,4 +34,26 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-*.env
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Testing
+coverage
+.nyc_output
+
+# Misc
+*.pem
+*.key
+*.crt
+.DS_Store
+*.pid
+*.seed
+*.pid.lock
+
+# Vite
+.vite
