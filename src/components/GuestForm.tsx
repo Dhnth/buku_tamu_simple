@@ -59,9 +59,9 @@ export default function GuestForm() {
         {/* Welcome Header */}
         <div className="mb-5 text-center space-y-2">
           <h2 className="text-display-mobile text-on-surface leading-tight">
-            Selamat Datang di
+            Kegiatan
             <br />
-            <span className="text-primary">Literasi Sekolah</span>
+            <span className="text-primary">Pengimbasan dan Donasi Literasi SMKN 1 Banjar</span>
           </h2>
           <p className="text-body-md text-on-surface-variant max-w-xs mx-auto">
             Silakan isi data kunjungan Anda di bawah ini.
