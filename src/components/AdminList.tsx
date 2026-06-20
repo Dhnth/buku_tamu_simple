@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase, type Tamu } from "../lib/supabase";
 import {
@@ -12,6 +12,10 @@ import {
   RefreshCw,
   AlertTriangle,
   Download,
+  CheckSquare,
+  Square,
+  Trash,
+  Loader2,
 } from "lucide-react";
 import * as ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -22,8 +26,6 @@ export default function AdminList() {
   const [tamu, setTamu] = useState<Tamu[]>([]);
   const [filteredTamu, setFilteredTamu] = useState<Tamu[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showQRModal, setShowQRModal] = useState(false);
@@ -32,9 +34,14 @@ export default function AdminList() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  
+  // Bulk action states
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  
   const navigate = useNavigate();
-  const limit = 10;
-  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   const getTimeAgo = useCallback((date: string) => {
     const now = new Date();
@@ -61,12 +68,8 @@ export default function AdminList() {
   };
 
   const fetchTamu = useCallback(
-    async (pageNum: number, search: string = "", reset: boolean = false) => {
-      if (loading && !reset) return;
+    async (search: string = "") => {
       setLoading(true);
-
-      const from = pageNum * limit;
-      const to = from + limit - 1;
 
       let query = supabase.from("tamu").select("*", { count: "exact" });
 
@@ -75,8 +78,7 @@ export default function AdminList() {
       }
 
       const { data, error, count } = await query
-        .order("created_at", { ascending: false })
-        .range(from, to);
+        .order("created_at", { ascending: false });
 
       setLoading(false);
       setIsInitialLoad(false);
@@ -91,42 +93,43 @@ export default function AdminList() {
       }
 
       if (data) {
-        if (reset || pageNum === 0) {
-          setTamu(data);
-          setFilteredTamu(data);
-        } else {
-          setTamu((prev) => [...prev, ...data]);
-          setFilteredTamu((prev) => [...prev, ...data]);
-        }
-        setHasMore(data.length === limit);
-      } else {
-        setHasMore(false);
+        setTamu(data);
+        setFilteredTamu(data);
+        // Reset selected IDs setelah fetch
+        setSelectedIds(new Set());
       }
     },
-    [loading, limit]
+    []
   );
+
+  // Initial load
+  useEffect(() => {
+    const loadData = async () => {
+      const isAdmin = localStorage.getItem("isAdmin");
+      if (!isAdmin) {
+        navigate("/");
+        return;
+      }
+      await fetchTamu();
+    };
+    loadData();
+  }, [fetchTamu, navigate]);
 
   // Search handler dengan debounce
   useEffect(() => {
     const searchTamu = async () => {
       if (!searchQuery.trim()) {
-        setPage(0);
-        setHasMore(true);
-        setIsInitialLoad(true);
-        await fetchTamu(0, "", true);
+        await fetchTamu();
         return;
       }
 
       setLoading(true);
-      const from = 0;
-      const to = from + limit - 1;
 
       const { data, error, count } = await supabase
         .from("tamu")
         .select("*", { count: "exact" })
         .ilike("nama", `%${searchQuery.trim()}%`)
-        .order("created_at", { ascending: false })
-        .range(from, to);
+        .order("created_at", { ascending: false });
 
       setLoading(false);
 
@@ -141,50 +144,19 @@ export default function AdminList() {
 
       if (data) {
         setFilteredTamu(data);
-        setHasMore(false);
-        setPage(0);
+        setSelectedIds(new Set());
       }
     };
 
     const debounce = setTimeout(searchTamu, 300);
     return () => clearTimeout(debounce);
-  }, [searchQuery, limit, fetchTamu]);
+  }, [searchQuery, fetchTamu]);
 
-  useEffect(() => {
-    const loadData = async () => {
-      const isAdmin = localStorage.getItem("isAdmin");
-      if (!isAdmin) {
-        navigate("/");
-        return;
-      }
-      await fetchTamu(0);
-    };
-    loadData();
-  }, [fetchTamu, navigate]);
-
-  // Intersection Observer untuk infinite scroll manual
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && !loading && hasMore && !searchQuery.trim()) {
-          const nextPage = page + 1;
-          setPage(nextPage);
-          fetchTamu(nextPage);
-        }
-      },
-      { threshold: 0.1 }
-    );
-
-    if (loadMoreRef.current) {
-      observer.observe(loadMoreRef.current);
-    }
-
-    return () => {
-      if (loadMoreRef.current) {
-        observer.unobserve(loadMoreRef.current);
-      }
-    };
-  }, [loading, hasMore, page, searchQuery, fetchTamu]);
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await fetchTamu(searchQuery);
+    setRefreshing(false);
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("isAdmin");
@@ -197,13 +169,20 @@ export default function AdminList() {
     setTotalCount((prev) => prev + 1);
   };
 
+  // Single delete
   const handleDelete = async (id: string) => {
     setDeletingId(id);
-    const { error } = await supabase.from("tamu").delete().eq("id", id);
+    
+    const { error } = await supabase
+      .from("tamu")
+      .delete()
+      .eq("id", id);
 
     if (error) {
       console.error("Error deleting tamu:", error);
+      alert(`Gagal menghapus: ${error.message}`);
       setDeletingId(null);
+      setShowDeleteConfirm(null);
       return;
     }
 
@@ -212,22 +191,71 @@ export default function AdminList() {
     setTotalCount((prev) => prev - 1);
     setDeletingId(null);
     setShowDeleteConfirm(null);
+    setSelectedIds((prev) => {
+      const newSet = new Set(prev);
+      newSet.delete(id);
+      return newSet;
+    });
+  };
+
+  // Bulk actions
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const currentData = searchQuery.trim() ? filteredTamu : tamu;
+    if (selectedIds.size === currentData.length && currentData.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      const allIds = currentData.map((item) => item.id);
+      setSelectedIds(new Set(allIds));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    
+    setIsBulkDeleting(true);
+    
+    const { error } = await supabase
+      .from("tamu")
+      .delete()
+      .in("id", Array.from(selectedIds));
+
+    if (error) {
+      console.error("Error bulk deleting tamu:", error);
+      alert(`Gagal menghapus: ${error.message}`);
+      setIsBulkDeleting(false);
+      return;
+    }
+
+    setTamu((prev) => prev.filter((item) => !selectedIds.has(item.id)));
+    setFilteredTamu((prev) => prev.filter((item) => !selectedIds.has(item.id)));
+    setTotalCount((prev) => prev - selectedIds.size);
+    setSelectedIds(new Set());
+    setIsBulkDeleting(false);
+    setShowBulkDeleteConfirm(false);
   };
 
   const clearSearch = () => {
     setSearchQuery("");
-    setPage(0);
-    setHasMore(true);
-    setIsInitialLoad(true);
-    fetchTamu(0, "", true);
+    fetchTamu();
   };
 
-  // Export Excel dengan styling
+  // Export Excel
   const handleExportExcel = async () => {
     setExporting(true);
     
     try {
-      // Ambil semua data
       const { data, error } = await supabase
         .from("tamu")
         .select("*")
@@ -245,14 +273,11 @@ export default function AdminList() {
         return;
       }
 
-      // Buat workbook dan worksheet
       const workbook = new ExcelJS.Workbook();
       const worksheet = workbook.addWorksheet('Daftar Tamu', {
         views: [{ state: 'frozen', ySplit: 1 }]
       });
 
-      // ===== STYLING =====
-      // Warna primary dari tema (#3525cd)
       const primaryColor = 'FF3525CD';
       const primaryLight = 'FF4F46E5';
       const surfaceColor = 'FFF8F9FA';
@@ -260,7 +285,6 @@ export default function AdminList() {
       const textColor = 'FF191C1D';
       const textLightColor = 'FF777587';
 
-      // Column widths
       worksheet.columns = [
         { header: 'No', key: 'no', width: 8 },
         { header: 'Nama Lengkap', key: 'nama', width: 30 },
@@ -268,13 +292,8 @@ export default function AdminList() {
         { header: 'Tanggal Kunjungan', key: 'tanggal', width: 25 },
       ];
 
-      // ===== HEADER STYLING =====
       const headerRow = worksheet.getRow(1);
-      
-      // Set tinggi header
       headerRow.height = 30;
-      
-      // Style setiap cell di header
       headerRow.eachCell((cell) => {
         cell.fill = {
           type: 'pattern',
@@ -300,8 +319,6 @@ export default function AdminList() {
         };
       });
 
-      // ===== DATA STYLING =====
-      // Isi data
       data.forEach((item, index) => {
         const row = worksheet.addRow({
           no: index + 1,
@@ -310,31 +327,24 @@ export default function AdminList() {
           tanggal: formatDate(item.created_at)
         });
 
-        // Set tinggi row
         row.height = 24;
-
-        // Style setiap cell di row
         row.eachCell((cell, colNumber) => {
-          // Warna background bergantian (zebra)
           const isEven = index % 2 === 0;
           cell.fill = {
             type: 'pattern',
             pattern: 'solid',
             fgColor: { argb: isEven ? 'FFFFFFFF' : surfaceColor }
           };
-          
           cell.font = {
             name: 'Calibri',
             size: 11,
             color: { argb: textColor }
           };
-          
           cell.alignment = {
             vertical: 'middle',
             horizontal: colNumber === 1 ? 'center' : 'left',
             wrapText: true
           };
-          
           cell.border = {
             top: { style: 'thin', color: { argb: borderColor } },
             left: { style: 'thin', color: { argb: borderColor } },
@@ -343,7 +353,6 @@ export default function AdminList() {
           };
         });
 
-        // Style khusus untuk kolom No (center alignment)
         const noCell = row.getCell(1);
         noCell.alignment = {
           vertical: 'middle',
@@ -356,12 +365,9 @@ export default function AdminList() {
         };
       });
 
-      // ===== FOOTER =====
-      // Tambah baris kosong
       const emptyRow = worksheet.addRow([]);
       emptyRow.height = 10;
 
-      // Footer dengan total
       const footerRow = worksheet.addRow({
         no: '',
         nama: '',
@@ -392,10 +398,8 @@ export default function AdminList() {
         };
       });
 
-      // Merge cell untuk footer
       worksheet.mergeCells(`C${footerRow.number}:D${footerRow.number}`);
 
-      // ===== GENERATE FILE =====
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], { 
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
@@ -471,6 +475,14 @@ export default function AdminList() {
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all active:scale-95 touch-manipulation cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Refresh data"
+            >
+              <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
               onClick={() => setShowQRModal(true)}
               className="p-2 text-on-surface-variant hover:text-primary hover:bg-primary/10 rounded-lg transition-all active:scale-95 touch-manipulation cursor-pointer"
               title="Tampilkan QR Code"
@@ -511,7 +523,7 @@ export default function AdminList() {
             <button
               onClick={handleExportExcel}
               disabled={exporting || totalCount === 0}
-              className="flex-1 sm:flex-none bg-green-500 text-white hover:bg-green-600 px-4 py-2 rounded-lg font-label-sm font-medium transition-all flex items-center justify-center gap-2 border active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer touch-manipulation"
+              className="flex-1 sm:flex-none bg-green-500 text-white hover:bg-green-600 px-4 py-2 rounded-lg font-label-sm font-medium transition-all flex items-center justify-center gap-2 active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer touch-manipulation"
             >
               {exporting ? (
                 <>
@@ -520,8 +532,8 @@ export default function AdminList() {
                 </>
               ) : (
                 <>
-                  <Download className="w-4 h-4" />Export
-                  {/* <span className="hidden xs:inline">Export</span> */}
+                  <Download className="w-4 h-4" />
+                  <span>Export</span>
                 </>
               )}
             </button>
@@ -536,8 +548,8 @@ export default function AdminList() {
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="mb-4">
+        {/* Search Bar + Bulk Actions */}
+        <div className="mb-4 space-y-2">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-outline" />
             <input
@@ -556,6 +568,23 @@ export default function AdminList() {
               </button>
             )}
           </div>
+          
+          {/* Bulk Action Bar */}
+          {selectedIds.size > 0 && (
+            <div className="flex items-center justify-between gap-2 bg-primary/5 border border-primary/20 rounded-lg px-3 py-2 animate-in fade-in slide-in-from-top duration-200">
+              <span className="text-label-sm text-on-surface-variant">
+                <span className="font-semibold text-on-surface">{selectedIds.size}</span> tamu dipilih
+              </span>
+              <button
+                onClick={() => setShowBulkDeleteConfirm(true)}
+                className="bg-error text-on-error px-3 py-1.5 rounded-lg text-label-sm font-medium hover:bg-error/90 transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash className="w-4 h-4" />
+                Hapus Semua
+              </button>
+            </div>
+          )}
+          
           {searchQuery && (
             <p className="text-label-xs text-on-surface-variant/60 mt-1.5">
               Menampilkan {displayData.length} dari {totalCount} tamu
@@ -566,130 +595,163 @@ export default function AdminList() {
         {/* Table */}
         <div
           id="scrollableDiv"
-          className="h-[calc(100dvh-280px)] overflow-y-auto scroll-smooth -mx-1 px-1"
+          className="h-[calc(100dvh-300px)] overflow-y-auto scroll-smooth -mx-1 px-1"
           style={{ scrollBehavior: "smooth" }}
         >
           <div className="bg-surface-container-lowest rounded-lg border border-outline-variant/60 overflow-hidden">
             {/* Table Header */}
-            <div className="hidden sm:grid grid-cols-12 gap-3 px-4 py-3 bg-surface-container-low border-b border-outline-variant/40 text-label-xs font-medium text-on-surface-variant/60 uppercase tracking-wider">
-              <div className="col-span-1">#</div>
-              <div className="col-span-4">Nama</div>
-              <div className="col-span-4">Instansi</div>
-              <div className="col-span-2">Waktu</div>
-              <div className="col-span-1 text-right">Aksi</div>
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3 px-4 py-3 bg-surface-container-low border-b border-outline-variant/40 text-label-xs font-medium text-on-surface-variant/60 uppercase tracking-wider">
+              <div className="flex items-center gap-2 sm:col-span-1">
+                {displayData.length > 0 && (
+                  <button
+                    onClick={toggleSelectAll}
+                    className="text-on-surface-variant/60 hover:text-primary transition-colors cursor-pointer"
+                  >
+                    {selectedIds.size === displayData.length && displayData.length > 0 ? (
+                      <CheckSquare className="w-4 h-4" />
+                    ) : (
+                      <Square className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
+                <span className="hidden sm:inline">#</span>
+              </div>
+              <div className="sm:col-span-4">Nama</div>
+              <div className="sm:col-span-4">Instansi</div>
+              <div className="sm:col-span-2">Waktu</div>
+              <div className="sm:col-span-1 text-right">Aksi</div>
             </div>
 
             {/* Table Body */}
-            {displayData.map((item, index) => (
-              <div
-                key={item.id}
-                className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3 px-4 py-3 border-b border-outline-variant/30 last:border-b-0 hover:bg-surface-container-low/50 transition-colors"
-              >
-                {/* Nomor */}
-                <div className="hidden sm:flex sm:col-span-1 items-center text-label-sm text-on-surface-variant/60">
-                  {index + 1}
-                </div>
-
-                {/* Nama */}
-                <div className="sm:col-span-4">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center shrink-0 sm:hidden">
-                      <Users className="w-4 h-4 text-primary" />
+            {loading ? (
+              [...Array(5)].map((_, i) => (
+                <div
+                  key={i}
+                  className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3 px-4 py-3 border-b border-outline-variant/30 animate-pulse"
+                >
+                  <div className="sm:col-span-1">
+                    <div className="h-4 bg-surface-container-low rounded w-6" />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 bg-surface-container-low rounded-full" />
+                      <div className="h-4 bg-surface-container-low rounded w-32" />
                     </div>
-                    <span className="text-body-md font-medium text-on-surface truncate">
-                      {item.nama}
+                  </div>
+                  <div className="sm:col-span-4">
+                    <div className="h-4 bg-surface-container-low rounded w-40" />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <div className="h-4 bg-surface-container-low rounded w-20" />
+                  </div>
+                  <div className="sm:col-span-1 flex justify-end">
+                    <div className="w-8 h-8 bg-surface-container-low rounded-lg" />
+                  </div>
+                </div>
+              ))
+            ) : displayData.length > 0 ? (
+              displayData.map((item, index) => (
+                <div
+                  key={item.id}
+                  className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3 px-4 py-3 border-b border-outline-variant/30 last:border-b-0 hover:bg-surface-container-low/50 transition-colors"
+                >
+                  {/* Checkbox + Nomor */}
+                  <div className="sm:col-span-1 flex items-center gap-2">
+                    <button
+                      onClick={() => toggleSelect(item.id)}
+                      className="text-on-surface-variant/60 hover:text-primary transition-colors cursor-pointer shrink-0"
+                    >
+                      {selectedIds.has(item.id) ? (
+                        <CheckSquare className="w-4 h-4 text-primary" />
+                      ) : (
+                        <Square className="w-4 h-4" />
+                      )}
+                    </button>
+                    <span className="text-label-sm text-on-surface-variant/60 hidden sm:inline">
+                      {index + 1}
                     </span>
                   </div>
-                </div>
 
-                {/* Instansi */}
-                <div className="sm:col-span-4">
-                  <p className="text-body-md text-on-surface-variant truncate">
-                    {item.instansi}
-                  </p>
-                </div>
-
-                {/* Waktu */}
-                <div className="sm:col-span-2">
-                  <span className="text-label-xs text-on-surface-variant/60 whitespace-nowrap">
-                    {getTimeAgo(item.created_at)}
-                  </span>
-                </div>
-
-                {/* Aksi */}
-                <div className="sm:col-span-1 flex items-center justify-end sm:justify-end gap-2">
-                  {showDeleteConfirm === item.id ? (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => handleDelete(item.id)}
-                        disabled={deletingId === item.id}
-                        className="p-1.5 bg-error text-on-error rounded-lg hover:bg-error/90 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                        title="Konfirmasi hapus"
-                      >
-                        {deletingId === item.id ? (
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <AlertTriangle className="w-4 h-4" />
-                        )}
-                      </button>
-                      <button
-                        onClick={() => setShowDeleteConfirm(null)}
-                        className="p-1.5 bg-surface-container-low text-on-surface-variant rounded-lg hover:bg-surface-container transition-all active:scale-95 cursor-pointer"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                  {/* Nama */}
+                  <div className="sm:col-span-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center shrink-0 sm:hidden">
+                        <Users className="w-4 h-4 text-primary" />
+                      </div>
+                      <span className="text-body-md font-medium text-on-surface truncate">
+                        {item.nama}
+                      </span>
                     </div>
-                  ) : (
-                    <button
-                      onClick={() => setShowDeleteConfirm(item.id)}
-                      className="p-1.5 text-on-surface-variant/40 hover:text-error hover:bg-error/10 rounded-lg transition-all active:scale-95 cursor-pointer"
-                      title="Hapus tamu"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
+                  </div>
 
-            {/* End Message / Load More Trigger */}
-            {displayData.length > 0 && (
-              <div ref={loadMoreRef} className="py-4 text-center">
-                {hasMore && !searchQuery.trim() ? (
-                  <div className="flex items-center justify-center gap-2 text-label-sm text-on-surface-variant/60">
-                    <div className="w-5 h-5 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-                    <span>Memuat lebih banyak...</span>
+                  {/* Instansi */}
+                  <div className="sm:col-span-4">
+                    <p className="text-body-md text-on-surface-variant truncate">
+                      {item.instansi}
+                    </p>
                   </div>
-                ) : (
-                  <div className="flex items-center justify-center gap-2 text-label-sm text-on-surface-variant/40">
-                    <div className="w-8 h-px bg-outline-variant/20" />
-                    <span>Semua data dimuat</span>
-                    <div className="w-8 h-px bg-outline-variant/20" />
+
+                  {/* Waktu */}
+                  <div className="sm:col-span-2">
+                    <span className="text-label-xs text-on-surface-variant/60 whitespace-nowrap">
+                      {getTimeAgo(item.created_at)}
+                    </span>
                   </div>
+
+                  {/* Aksi */}
+                  <div className="sm:col-span-1 flex items-center justify-end sm:justify-end gap-2">
+                    {showDeleteConfirm === item.id ? (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          disabled={deletingId === item.id}
+                          className="p-1.5 bg-error text-on-error rounded-lg hover:bg-error/90 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                          title="Konfirmasi hapus"
+                        >
+                          {deletingId === item.id ? (
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <AlertTriangle className="w-4 h-4" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => setShowDeleteConfirm(null)}
+                          className="p-1.5 bg-surface-container-low text-on-surface-variant rounded-lg hover:bg-surface-container transition-all active:scale-95 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setShowDeleteConfirm(item.id)}
+                        className="p-1.5 text-on-surface-variant/40 hover:text-error hover:bg-error/10 rounded-lg transition-all active:scale-95 cursor-pointer"
+                        title="Hapus tamu"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="py-12 text-center">
+                <div className="w-16 h-16 bg-surface-container-low rounded-full flex items-center justify-center mx-auto mb-3">
+                  <Users className="w-8 h-8 text-outline-variant" />
+                </div>
+                <p className="text-body-md text-on-surface-variant">
+                  {searchQuery ? "Tamu tidak ditemukan" : "Belum ada tamu"}
+                </p>
+                {!searchQuery && (
+                  <button
+                    onClick={() => setShowAddModal(true)}
+                    className="mt-3 text-label-sm text-primary font-medium hover:underline cursor-pointer"
+                  >
+                    Tambah tamu pertama
+                  </button>
                 )}
               </div>
             )}
           </div>
-
-          {/* Empty State */}
-          {displayData.length === 0 && !isInitialLoad && (
-            <div className="py-12 text-center">
-              <div className="w-16 h-16 bg-surface-container-low rounded-full flex items-center justify-center mx-auto mb-3">
-                <Users className="w-8 h-8 text-outline-variant" />
-              </div>
-              <p className="text-body-md text-on-surface-variant">
-                {searchQuery ? "Tamu tidak ditemukan" : "Belum ada tamu"}
-              </p>
-              {!searchQuery && (
-                <button
-                  onClick={() => setShowAddModal(true)}
-                  className="mt-3 text-label-sm text-primary font-medium hover:underline cursor-pointer"
-                >
-                  Tambah tamu pertama
-                </button>
-              )}
-            </div>
-          )}
         </div>
       </main>
 
@@ -701,6 +763,50 @@ export default function AdminList() {
       />
 
       <QRCodeModal isOpen={showQRModal} onClose={() => setShowQRModal(false)} />
+
+      {/* Bulk Delete Confirm Modal */}
+      {showBulkDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant p-6 w-full max-w-md shadow-xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="bg-error/10 p-2 rounded-full">
+                <AlertTriangle className="w-6 h-6 text-error" />
+              </div>
+              <h2 className="text-headline-md text-on-surface">Konfirmasi Hapus</h2>
+            </div>
+            
+            <p className="text-body-md text-on-surface-variant mb-6">
+              Apakah Anda yakin ingin menghapus <span className="font-semibold text-on-surface">{selectedIds.size}</span> tamu yang dipilih? Tindakan ini tidak dapat dibatalkan.
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowBulkDeleteConfirm(false)}
+                className="flex-1 bg-surface-container-low text-on-surface-variant px-4 py-2.5 rounded-lg font-label-sm font-medium hover:bg-surface-container transition-all cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleBulkDelete}
+                disabled={isBulkDeleting}
+                className="flex-1 bg-error text-on-error px-4 py-2.5 rounded-lg font-label-sm font-medium hover:bg-error/90 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {isBulkDeleting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Menghapus...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash className="w-4 h-4" />
+                    <span>Hapus Semua</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
